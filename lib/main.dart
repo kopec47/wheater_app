@@ -101,7 +101,7 @@ class WeatherScreen extends StatelessWidget {
                     child: WeatherCard(
                       title: "Wiatr",
                       value: "${mockData.windSpeed}km/h",
-                      icon: "💨💨",
+                      icon: "💨",
                     ),
                   ),
                 ],
