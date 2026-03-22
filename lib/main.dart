@@ -108,7 +108,6 @@ class WeatherScreen extends StatelessWidget {
               ),
               const SizedBox(height: 24),
               
-              // Nowy podłużny kafelek baterii
               SizedBox(
                 width: double.infinity,
                 child: Card(
@@ -122,7 +121,7 @@ class WeatherScreen extends StatelessWidget {
                         Icon(
                           batteryLevel > 20 ? Icons.battery_full : Icons.battery_alert,
                           color: batteryLevel > 20 ? Colors.green : Colors.red,
-                          size: 32, // Zwiększony rozmiar ikony
+                          size: 32, 
                         ),
                         const SizedBox(width: 16),
                         Text(
