@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 void main() {
   runApp(const WeatherApp());
@@ -147,8 +149,26 @@ class WeatherScreen extends StatelessWidget {
                 width: double.infinity,
                 height: 56,
                 child: ElevatedButton(
-                  onPressed: () {
-                    print("Szukam stacji ESP32...");
+                  onPressed: () async {
+                    print("Proszę o uprawnienia...");
+                    await Permission.bluetoothScan.request();
+                    await Permission.bluetoothConnect.request();
+
+                    print("Czekam na włączenie Bluetooth w telefonie...");
+                    await FlutterBluePlus.adapterState
+                        .where((state) => state == BluetoothAdapterState.on)
+                        .first;
+
+                    print("Rozpoczynam skanowanie...");
+                    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
+
+                    FlutterBluePlus.scanResults.listen((results) {
+                      for (ScanResult r in results) {
+                        if (r.device.advName.isNotEmpty) {
+                          print('Znaleziono: ${r.device.advName} (ID: ${r.device.remoteId})');
+                        }
+                      }
+                    });
                   },
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Theme.of(context).colorScheme.primary,
