@@ -162,7 +162,7 @@ class _WeatherScreenState extends State<WeatherScreen> {
     } catch (e) {
       // PRÓBA 2: Jeśli to nie tekst, spróbujmy odczytać surowe bajty (diagnostyka)
       // Jeśli ESP32 wysyła np. 1 bajt temperatury
-      if (value.length >= 1) {
+      if (value.isNotEmpty) {
         setState(() {
           temperature = value[0].toDouble();
           connectionStatus = "Surowe dane: ${value.length} bajtów";
