@@ -2,25 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'dart:async';
+import 'dart:convert';
 
 void main() {
   runApp(const WeatherApp());
-}
-
-class WeatherData {
-  final double temperature;
-  final double humidity;
-  final double pressure;
-  final double windSpeed;
-  final int timestamp;
-
-  WeatherData({
-    required this.temperature,
-    required this.humidity,
-    required this.pressure,
-    required this.windSpeed,
-    int? timestamp,
-  }) : timestamp = timestamp ?? DateTime.now().millisecondsSinceEpoch;
 }
 
 class WeatherApp extends StatelessWidget {
@@ -40,20 +26,153 @@ class WeatherApp extends StatelessWidget {
   }
 }
 
-class WeatherScreen extends StatelessWidget {
+class WeatherScreen extends StatefulWidget {
   const WeatherScreen({super.key});
 
   @override
+  State<WeatherScreen> createState() => _WeatherScreenState();
+}
+
+class _WeatherScreenState extends State<WeatherScreen> {
+  double temperature = 0.0;
+  double humidity = 0.0;
+  double pressure = 0.0;
+  double windSpeed = 0.0;
+  int batteryLevel = 0;
+  
+  String connectionStatus = "Rozłączono";
+  bool isConnecting = false;
+
+  List<double> tempHistory = [20.0, 21.5, 22.0, 24.5, 23.0, 22.5, 25.0];
+
+  Future<void> connectToEsp() async {
+    setState(() {
+      isConnecting = true;
+      connectionStatus = "Szukanie stacji...";
+    });
+
+    try {
+      await [Permission.bluetoothScan, Permission.bluetoothConnect].request();
+
+      if (await FlutterBluePlus.adapterState.first == BluetoothAdapterState.off) {
+        setState(() {
+          connectionStatus = "Włącz Bluetooth!";
+          isConnecting = false;
+        });
+        return;
+      }
+
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
+
+      FlutterBluePlus.scanResults.listen((results) async {
+        for (ScanResult r in results) {
+          String name = r.device.platformName.isEmpty ? r.device.advName : r.device.platformName;
+          
+          if (name.toLowerCase().contains("weather")) {
+            await FlutterBluePlus.stopScan();
+            
+            if (mounted) setState(() => connectionStatus = "Łączenie...");
+
+            try {
+              await Future.delayed(const Duration(milliseconds: 500));
+              await r.device.connect(autoConnect: false);
+              
+              if (mounted) {
+                setState(() => connectionStatus = "Odkrywanie usług...");
+              }
+              
+              _discoverServices(r.device);
+              return;
+
+            } catch (e) {
+              if (mounted) {
+                setState(() {
+                  connectionStatus = "Błąd: $e";
+                  isConnecting = false;
+                });
+              }
+            }
+          }
+        }
+      });
+
+      await Future.delayed(const Duration(seconds: 5));
+      if (mounted && connectionStatus == "Szukanie stacji...") {
+         setState(() {
+          connectionStatus = "Nie znaleziono";
+          isConnecting = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => isConnecting = false);
+    }
+  }
+
+  void _discoverServices(BluetoothDevice device) async {
+    try {
+      List<BluetoothService> services = await device.discoverServices();
+      bool foundAnyData = false;
+
+      for (var service in services) {
+        for (var characteristic in service.characteristics) {
+          // Szukamy charakterystyki, która pozwala na powiadomienia (Notify lub Indicate)
+          if (characteristic.properties.notify || characteristic.properties.indicate) {
+            
+            await characteristic.setNotifyValue(true);
+            foundAnyData = true;
+
+            characteristic.lastValueStream.listen((value) {
+              if (value.isNotEmpty) {
+                _processIncomingData(value);
+              }
+            });
+          }
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          connectionStatus = foundAnyData ? "Odbieranie danych" : "Połączono (brak kanału danych)";
+          isConnecting = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => connectionStatus = "Błąd usług: $e");
+    }
+  }
+
+  void _processIncomingData(List<int> value) {
+    try {
+      // PRÓBA 1: Dekodowanie jako tekst UTF-8 (np. "22.5,45,1013")
+      String decoded = utf8.decode(value);
+      List<String> parts = decoded.split(',');
+
+      if (parts.length >= 3) {
+        setState(() {
+          temperature = double.tryParse(parts[0]) ?? temperature;
+          humidity = double.tryParse(parts[1]) ?? humidity;
+          if (parts.length >= 4) pressure = double.tryParse(parts[2]) ?? pressure;
+          if (parts.length >= 5) windSpeed = double.tryParse(parts[3]) ?? windSpeed;
+          if (parts.length >= 5) batteryLevel = int.tryParse(parts[4]) ?? batteryLevel;
+          
+          tempHistory.add(temperature);
+          if (tempHistory.length > 7) tempHistory.removeAt(0);
+        });
+      }
+    } catch (e) {
+      // PRÓBA 2: Jeśli to nie tekst, spróbujmy odczytać surowe bajty (diagnostyka)
+      // Jeśli ESP32 wysyła np. 1 bajt temperatury
+      if (value.length >= 1) {
+        setState(() {
+          temperature = value[0].toDouble();
+          connectionStatus = "Surowe dane: ${value.length} bajtów";
+        });
+      }
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final mockData = WeatherData(
-      temperature: 22.5,
-      humidity: 45.0,
-      pressure: 1013.2,
-      windSpeed: 12.5,
-    );
-
-    final int batteryLevel = 85;
-
     return Scaffold(
       body: SafeArea(
         child: Padding(
@@ -64,29 +183,27 @@ class WeatherScreen extends StatelessWidget {
               const SizedBox(height: 24),
               const Text(
                 "Stacja Pogodowa",
-                style: TextStyle(
-                  fontSize: 28,
-                  fontWeight: FontWeight.w800,
-                ),
+                style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
               ),
+              Text(connectionStatus, style: TextStyle(color: Colors.grey[600], fontSize: 12)),
               const SizedBox(height: 32),
               Row(
                 children: [
                   Expanded(
                     child: WeatherCard(
                       title: "Temperatura",
-                      value: "${mockData.temperature}°C",
+                      value: "${temperature.toStringAsFixed(1)}°C",
                       icon: "🌡️",
-                      weeklyData: const [20.0, 21.5, 22.0, 24.5, 23.0, 22.5, 25.0],
+                      weeklyData: tempHistory,
                     ),
                   ),
                   const SizedBox(width: 16),
                   Expanded(
                     child: WeatherCard(
                       title: "Wilgotność",
-                      value: "${mockData.humidity}%",
+                      value: "${humidity.toStringAsFixed(1)}%",
                       icon: "💧",
-                      weeklyData: const [50.0, 48.0, 45.0, 47.0, 46.0, 45.0, 42.0],
+                      weeklyData: const [50, 48, 45, 47, 46, 45, 42],
                     ),
                   ),
                 ],
@@ -97,90 +214,38 @@ class WeatherScreen extends StatelessWidget {
                   Expanded(
                     child: WeatherCard(
                       title: "Ciśnienie",
-                      value: "${mockData.pressure} hPa",
+                      value: "${pressure.toStringAsFixed(0)} hPa",
                       icon: "⏱️",
-                      weeklyData: const [1012.0, 1010.0, 1013.0, 1015.0, 1013.2, 1011.0, 1012.0],
+                      weeklyData: const [1012, 1010, 1013, 1015, 1013, 1011, 1012],
                     ),
                   ),
                   const SizedBox(width: 16),
                   Expanded(
                     child: WeatherCard(
                       title: "Wiatr",
-                      value: "${mockData.windSpeed}km/h",
+                      value: "${windSpeed.toStringAsFixed(1)}km/h",
                       icon: "💨",
-                      weeklyData: const [10.0, 12.0, 15.0, 8.0, 12.5, 14.0, 12.0],
+                      weeklyData: const [10, 12, 15, 8, 12, 14, 12],
                     ),
                   ),
                 ],
               ),
               const SizedBox(height: 24),
-              
-              SizedBox(
-                width: double.infinity,
-                child: Card(
-                  elevation: 6,
-                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          batteryLevel > 20 ? Icons.battery_full : Icons.battery_alert,
-                          color: batteryLevel > 20 ? Colors.green : Colors.red,
-                          size: 32, 
-                        ),
-                        const SizedBox(width: 16),
-                        Text(
-                          '$batteryLevel%',
-                          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                                fontWeight: FontWeight.bold,
-                                color: Theme.of(context).colorScheme.primary,
-                              ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              
+              _buildBatteryCard(),
               const Spacer(),
               SizedBox(
                 width: double.infinity,
                 height: 56,
                 child: ElevatedButton(
-                  onPressed: () async {
-                    print("Proszę o uprawnienia...");
-                    await Permission.bluetoothScan.request();
-                    await Permission.bluetoothConnect.request();
-
-                    print("Czekam na włączenie Bluetooth w telefonie...");
-                    await FlutterBluePlus.adapterState
-                        .where((state) => state == BluetoothAdapterState.on)
-                        .first;
-
-                    print("Rozpoczynam skanowanie...");
-                    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
-
-                    FlutterBluePlus.scanResults.listen((results) {
-                      for (ScanResult r in results) {
-                        if (r.device.advName.isNotEmpty) {
-                          print('Znaleziono: ${r.device.advName} (ID: ${r.device.remoteId})');
-                        }
-                      }
-                    });
-                  },
+                  onPressed: isConnecting ? null : connectToEsp,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Theme.of(context).colorScheme.primary,
                     foregroundColor: Theme.of(context).colorScheme.onPrimary,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                   ),
-                  child: const Text(
-                    "Połączono z ESP32",
-                    style: TextStyle(fontSize: 18),
-                  ),
+                  child: isConnecting 
+                    ? const SizedBox(height: 24, width: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                    : const Text("Połącz z ESP32", style: TextStyle(fontSize: 18)),
                 ),
               ),
             ],
@@ -189,8 +254,38 @@ class WeatherScreen extends StatelessWidget {
       ),
     );
   }
-}
 
+  Widget _buildBatteryCard() {
+    return SizedBox(
+      width: double.infinity,
+      child: Card(
+        elevation: 6,
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                batteryLevel > 20 ? Icons.battery_full : Icons.battery_alert,
+                color: batteryLevel > 20 ? Colors.green : Colors.red,
+                size: 32,
+              ),
+              const SizedBox(width: 16),
+              Text(
+                '$batteryLevel%',
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.bold,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class WeatherCard extends StatelessWidget {
   final String title;
@@ -234,10 +329,7 @@ class WeatherCard extends StatelessWidget {
               children: [
                 Text(icon, style: const TextStyle(fontSize: 48)),
                 const SizedBox(height: 8),
-                Text(
-                  title,
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
+                Text(title, style: Theme.of(context).textTheme.titleMedium),
                 Text(
                   value,
                   style: Theme.of(context).textTheme.headlineSmall?.copyWith(
@@ -268,24 +360,17 @@ class WeatherDetailsScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    double average = weeklyData.reduce((a, b) => a + b) / weeklyData.length;
+    double average = weeklyData.isEmpty ? 0 : weeklyData.reduce((a, b) => a + b) / weeklyData.length;
     String unit = currentValue.replaceAll(RegExp(r'[0-9.,]'), '').trim();
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text(title, style: const TextStyle(color: Colors.black)),
-        backgroundColor: Theme.of(context).colorScheme.surface,
-        iconTheme: const IconThemeData(color: Colors.black),
-      ),
+      appBar: AppBar(title: Text(title)),
       body: Padding(
         padding: const EdgeInsets.all(24.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              "Obecnie",
-              style: Theme.of(context).textTheme.titleLarge?.copyWith(color: Colors.black87),
-            ),
+            const Text("Obecnie", style: TextStyle(fontSize: 20)),
             Text(
               currentValue,
               style: TextStyle(
@@ -295,78 +380,27 @@ class WeatherDetailsScreen extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 16),
-            Text(
-              "Średnia z tygodnia: ${average.toStringAsFixed(1)} $unit",
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: Colors.black87.withValues(alpha: 0.7),
-                  ),
-            ),
+            Text("Średnia z tygodnia: ${average.toStringAsFixed(1)} $unit"),
             const SizedBox(height: 48),
-            Text(
-              "Wykres (ostatnie 7 dni)",
-              style: Theme.of(context).textTheme.titleLarge?.copyWith(color: Colors.black87),
-            ),
-            const SizedBox(height: 24),
             Expanded(
               child: LineChart(
                 LineChartData(
-                  lineTouchData: LineTouchData(
-                    touchTooltipData: LineTouchTooltipData(
-                      getTooltipColor: (touchedSpot) => Colors.white,
-                      getTooltipItems: (touchedSpots) {
-                        return touchedSpots.map((touchedSpot) {
-                          return LineTooltipItem(
-                            touchedSpot.y.toStringAsFixed(1),
-                            const TextStyle(
-                              color: Colors.black,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          );
-                        }).toList();
-                      },
-                    ),
-                  ),
                   gridData: const FlGridData(show: false),
-                  titlesData: FlTitlesData(
-                    show: true,
-                    rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                    topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                    bottomTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                    leftTitles: AxisTitles(
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        reservedSize: 35,
-                        interval: 0.5,
-                        getTitlesWidget: (value, meta) {
-                          return Text(
-                            value.toStringAsFixed(1),
-                            style: const TextStyle(color: Colors.black54, fontSize: 12),
-                          );
-                        },
-                      ),
-                    ),
+                  titlesData: const FlTitlesData(
+                    rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                    topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
                   ),
-                  borderData: FlBorderData(show: false),
                   lineBarsData: [
                     LineChartBarData(
-                      spots: weeklyData.asMap().entries.map((e) {
-                        return FlSpot(e.key.toDouble(), e.value);
-                      }).toList(),
+                      spots: weeklyData.asMap().entries.map((e) => FlSpot(e.key.toDouble(), e.value)).toList(),
                       isCurved: true,
                       color: Theme.of(context).colorScheme.primary,
-                      barWidth: 4,
-                      isStrokeCapRound: true,
                       dotData: const FlDotData(show: true),
-                      belowBarData: BarAreaData(
-                        show: true,
-                        color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.2),
-                      ),
                     ),
                   ],
                 ),
               ),
             ),
-            const SizedBox(height: 48),
           ],
         ),
       ),
