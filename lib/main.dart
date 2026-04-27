@@ -143,7 +143,7 @@ class _WeatherScreenState extends State<WeatherScreen> {
 
   void _processIncomingData(List<int> value) {
     try {
-      // PRÓBA 1: Dekodowanie jako tekst UTF-8 (np. "22.5,45,1013")
+      
       String decoded = utf8.decode(value);
       List<String> parts = decoded.split(',');
 
@@ -151,17 +151,17 @@ class _WeatherScreenState extends State<WeatherScreen> {
         setState(() {
           temperature = double.tryParse(parts[0]) ?? temperature;
           humidity = double.tryParse(parts[1]) ?? humidity;
-          if (parts.length >= 4) pressure = double.tryParse(parts[2]) ?? pressure;
-          if (parts.length >= 5) windSpeed = double.tryParse(parts[3]) ?? windSpeed;
-          if (parts.length >= 5) batteryLevel = int.tryParse(parts[4]) ?? batteryLevel;
+
+          pressure = double .tryParse(parts[2]) ?? pressure;
+          if (parts.length >= 4) pressure = double.tryParse(parts[3]) ?? pressure;
+          if (parts.length >= 5) windSpeed = double.tryParse(parts[4]) ?? windSpeed;
+          if (parts.length >= 6) batteryLevel = int.tryParse(parts[5]) ?? batteryLevel;
           
           tempHistory.add(temperature);
           if (tempHistory.length > 7) tempHistory.removeAt(0);
         });
       }
     } catch (e) {
-      // PRÓBA 2: Jeśli to nie tekst, spróbujmy odczytać surowe bajty (diagnostyka)
-      // Jeśli ESP32 wysyła np. 1 bajt temperatury
       if (value.isNotEmpty) {
         setState(() {
           temperature = value[0].toDouble();
