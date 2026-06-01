@@ -5,7 +5,6 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 import 'package:intl/intl.dart';
-import 'dart:async';
 import 'dart:convert';
 
 void main() {
@@ -49,7 +48,7 @@ class ChartPoint {
 
 class DatabaseHelper {
   static Database? _database;
-  
+
   static Future<Database> get database async {
     if (_database != null) return _database!;
     _database = await openDatabase(
@@ -65,22 +64,30 @@ class DatabaseHelper {
   static Future<void> insert(WeatherMeasurement measurement) async {
     final db = await database;
     await db.insert(
-      'measurements', measurement.toMap(),
+      'measurements',
+      measurement.toMap(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
   }
 
   static Future<List<WeatherMeasurement>> getHistory() async {
     final db = await database;
-    final List<Map<String, dynamic>> maps = await db.query('measurements', orderBy: "timestamp DESC", limit: 100);
-    return List.generate(maps.length, (i) => WeatherMeasurement(
-      temperature: maps[i]['temperature'],
-      humidity: maps[i]['humidity'],
-      pressure: maps[i]['pressure'],
-      windSpeed: maps[i]['windSpeed'],
-      batteryLevel: maps[i]['batteryLevel'],
-      timestamp: DateTime.parse(maps[i]['timestamp']),
-    ));
+    final List<Map<String, dynamic>> maps = await db.query(
+      'measurements',
+      orderBy: "timestamp DESC",
+      limit: 100,
+    );
+    return List.generate(
+      maps.length,
+      (i) => WeatherMeasurement(
+        temperature: maps[i]['temperature'],
+        humidity: maps[i]['humidity'],
+        pressure: maps[i]['pressure'],
+        windSpeed: maps[i]['windSpeed'],
+        batteryLevel: maps[i]['batteryLevel'],
+        timestamp: DateTime.parse(maps[i]['timestamp']),
+      ),
+    );
   }
 
   static Future<void> clearAll() async {
@@ -119,7 +126,13 @@ class _WeatherScreenState extends State<WeatherScreen> {
   double pressure = 0.0;
   double windSpeed = 0.0;
   int batteryLevel = 0;
-  
+  int? optocouplerAdc;
+  double? optocouplerVoltage;
+  bool? optocouplerHigh;
+  int rotationCount = 0;
+  double calculatedRpm = 0.0;
+  String lastBlePacket = "";
+
   String connectionStatus = "Rozłączono";
   bool isConnecting = false;
   List<WeatherMeasurement> history = [];
@@ -146,12 +159,18 @@ class _WeatherScreenState extends State<WeatherScreen> {
         title: const Text("Resetuj pomiary?"),
         content: const Text("Wszystkie zapisane dane zostaną trwale usunięte."),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text("Anuluj")),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Anuluj"),
+          ),
           TextButton(
             onPressed: () async {
+              final navigator = Navigator.of(context);
               await DatabaseHelper.clearAll();
               await _loadHistory();
-              if (mounted) Navigator.pop(context);
+              if (mounted) {
+                navigator.pop();
+              }
             },
             child: const Text("Resetuj", style: TextStyle(color: Colors.red)),
           ),
@@ -189,14 +208,16 @@ class _WeatherScreenState extends State<WeatherScreen> {
       for (var characteristic in service.characteristics) {
         if (characteristic.properties.notify) {
           await characteristic.setNotifyValue(true);
-          characteristic.lastValueStream.listen((value) => _processIncomingData(value));
+          characteristic.lastValueStream.listen(
+            (value) => _processIncomingData(value),
+          );
         }
       }
     }
     if (mounted) {
       setState(() {
         connectionStatus = "Odbieranie danych";
-        isConnecting = false; 
+        isConnecting = false;
       });
     }
   }
@@ -204,46 +225,106 @@ class _WeatherScreenState extends State<WeatherScreen> {
   void _processIncomingData(List<int> value) {
     try {
       String decoded = utf8.decode(value);
-      List<String> parts = decoded.split(',');
-      if (parts.length >= 3) {
-        double temp = double.tryParse(parts[0]) ?? temperature;
-        double hum = double.tryParse(parts[1]) ?? humidity;
-        double press = double.tryParse(parts[2]) ?? pressure;
-        double wind = windSpeed;
-        if (parts.length >= 4) wind = double.tryParse(parts[3]) ?? windSpeed;
-        
-        setState(() {
-          temperature = temp;
-          humidity = hum;
-          pressure = press;
-          windSpeed = wind;
-        });
+      for (final packet
+          in decoded
+              .split('\n')
+              .map((item) => item.trim())
+              .where((item) => item.isNotEmpty)) {
+        List<String> parts = packet.split(',');
+        if (parts.length >= 3) {
+          double temp = double.tryParse(parts[0]) ?? temperature;
+          double hum = double.tryParse(parts[1]) ?? humidity;
+          double press = double.tryParse(parts[2]) ?? pressure;
+          double wind = windSpeed;
+          if (parts.length >= 4) wind = double.tryParse(parts[3]) ?? windSpeed;
 
-        if (temp != 0.0) {
-          final measurement = WeatherMeasurement(
-            temperature: temp,
-            humidity: hum,
-            pressure: press,
-            windSpeed: wind,
-            batteryLevel: 100,
-            timestamp: DateTime.now(),
-          );
-          DatabaseHelper.insert(measurement).then((_) => _loadHistory());
+          int? adc = optocouplerAdc;
+          double? voltage = optocouplerVoltage;
+          bool? high = optocouplerHigh;
+          int rotations = rotationCount;
+          double rpm = calculatedRpm;
+
+          if (parts.length >= 5) adc = int.tryParse(parts[4].trim());
+          if (parts.length >= 6) voltage = double.tryParse(parts[5].trim());
+          if (parts.length >= 7) high = _parseBool(parts[6]);
+          if (parts.length >= 8) {
+            rotations = int.tryParse(parts[7].trim()) ?? rotations;
+          }
+          if (parts.length >= 9) {
+            rpm = double.tryParse(parts[8].trim()) ?? rpm;
+          }
+
+          setState(() {
+            temperature = temp;
+            humidity = hum;
+            pressure = press;
+            windSpeed = wind;
+            optocouplerAdc = adc;
+            optocouplerVoltage = voltage;
+            optocouplerHigh = high;
+            rotationCount = rotations;
+            calculatedRpm = rpm;
+            lastBlePacket = packet;
+          });
+
+          if (temp != 0.0) {
+            final measurement = WeatherMeasurement(
+              temperature: temp,
+              humidity: hum,
+              pressure: press,
+              windSpeed: wind,
+              batteryLevel: 100,
+              timestamp: DateTime.now(),
+            );
+            DatabaseHelper.insert(measurement).then((_) => _loadHistory());
+          }
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      // Pakiet BLE może czasem przyjść ucięty; kolejna notyfikacja nadpisze dane.
+    }
+  }
+
+  bool? _parseBool(String value) {
+    final normalized = value.toLowerCase().trim();
+    if (normalized == '1' || normalized == 'true' || normalized == 'high') {
+      return true;
+    }
+    if (normalized == '0' || normalized == 'false' || normalized == 'low') {
+      return false;
+    }
+    return null;
   }
 
   @override
   Widget build(BuildContext context) {
-    List<ChartPoint> tempChart = history.map((e) => ChartPoint(e.timestamp, e.temperature)).toList().reversed.toList();
-    List<ChartPoint> humChart = history.map((e) => ChartPoint(e.timestamp, e.humidity)).toList().reversed.toList();
-    List<ChartPoint> pressChart = history.map((e) => ChartPoint(e.timestamp, e.pressure)).toList().reversed.toList();
-    List<ChartPoint> windChart = history.map((e) => ChartPoint(e.timestamp, e.windSpeed)).toList().reversed.toList();
+    List<ChartPoint> tempChart = history
+        .map((e) => ChartPoint(e.timestamp, e.temperature))
+        .toList()
+        .reversed
+        .toList();
+    List<ChartPoint> humChart = history
+        .map((e) => ChartPoint(e.timestamp, e.humidity))
+        .toList()
+        .reversed
+        .toList();
+    List<ChartPoint> pressChart = history
+        .map((e) => ChartPoint(e.timestamp, e.pressure))
+        .toList()
+        .reversed
+        .toList();
+    List<ChartPoint> windChart = history
+        .map((e) => ChartPoint(e.timestamp, e.windSpeed))
+        .toList()
+        .reversed
+        .toList();
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Stacja Pogodowa", style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text(
+          "Stacja Pogodowa",
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
         centerTitle: true,
         backgroundColor: Theme.of(context).colorScheme.primaryContainer,
         actions: [
@@ -260,23 +341,95 @@ class _WeatherScreenState extends State<WeatherScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Text(connectionStatus, style: TextStyle(color: Colors.grey[600], fontSize: 14, fontWeight: FontWeight.bold)),
+              Text(
+                connectionStatus,
+                style: TextStyle(
+                  color: Colors.grey[600],
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
               const SizedBox(height: 16),
               Row(
                 children: [
-                  Expanded(child: WeatherCard(title: "Temperatura", value: "${temperature.toStringAsFixed(1)}°C", icon: "🌡️", chartData: tempChart)),
+                  Expanded(
+                    child: WeatherCard(
+                      title: "Temperatura",
+                      value: "${temperature.toStringAsFixed(1)}°C",
+                      icon: "🌡️",
+                      chartData: tempChart,
+                    ),
+                  ),
                   const SizedBox(width: 16),
-                  Expanded(child: WeatherCard(title: "Wilgotność", value: "${humidity.toStringAsFixed(1)}%", icon: "💧", chartData: humChart)),
+                  Expanded(
+                    child: WeatherCard(
+                      title: "Wilgotność",
+                      value: "${humidity.toStringAsFixed(1)}%",
+                      icon: "💧",
+                      chartData: humChart,
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: 16),
               Row(
                 children: [
-                  Expanded(child: WeatherCard(title: "Ciśnienie", value: "${pressure.toStringAsFixed(0)} hPa", icon: "⏱️", chartData: pressChart)),
+                  Expanded(
+                    child: WeatherCard(
+                      title: "Ciśnienie",
+                      value: "${pressure.toStringAsFixed(0)} hPa",
+                      icon: "⏱️",
+                      chartData: pressChart,
+                    ),
+                  ),
                   const SizedBox(width: 16),
-                  Expanded(child: WeatherCard(title: "Wiatr", value: "${windSpeed.toStringAsFixed(1)} km/h", icon: "💨", chartData: windChart)),
+                  Expanded(
+                    child: WeatherCard(
+                      title: "Wiatr",
+                      value: "${windSpeed.toStringAsFixed(1)} km/h",
+                      icon: "💨",
+                      chartData: windChart,
+                    ),
+                  ),
                 ],
               ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: SensorCard(
+                      title: "ADC GPIO40",
+                      value: optocouplerAdc?.toString() ?? "--",
+                      subtitle: optocouplerVoltage == null
+                          ? "Napięcie: --"
+                          : "Napięcie: ${optocouplerVoltage!.toStringAsFixed(2)} V",
+                      icon: Icons.sensors,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: SensorCard(
+                      title: "Transoptor",
+                      value: optocouplerHigh == null
+                          ? "--"
+                          : (optocouplerHigh! ? "HIGH" : "LOW"),
+                      subtitle:
+                          "Obroty: $rotationCount | RPM: ${calculatedRpm.toStringAsFixed(1)}",
+                      icon: Icons.sync,
+                    ),
+                  ),
+                ],
+              ),
+              if (lastBlePacket.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  "Ostatni pakiet BLE: $lastBlePacket",
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: Colors.grey[600], fontSize: 12),
+                  textAlign: TextAlign.center,
+                ),
+              ],
               const Spacer(),
               SizedBox(
                 width: double.infinity,
@@ -286,11 +439,16 @@ class _WeatherScreenState extends State<WeatherScreen> {
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Theme.of(context).colorScheme.primary,
                     foregroundColor: Theme.of(context).colorScheme.onPrimary,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
                   ),
-                  child: isConnecting 
-                    ? const CircularProgressIndicator(color: Colors.white)
-                    : const Text("Połącz z ESP32", style: TextStyle(fontSize: 18)),
+                  child: isConnecting
+                      ? const CircularProgressIndicator(color: Colors.white)
+                      : const Text(
+                          "Połącz z ESP32",
+                          style: TextStyle(fontSize: 18),
+                        ),
                 ),
               ),
             ],
@@ -305,7 +463,13 @@ class WeatherCard extends StatelessWidget {
   final String title, value, icon;
   final List<ChartPoint> chartData;
 
-  const WeatherCard({super.key, required this.title, required this.value, required this.icon, required this.chartData});
+  const WeatherCard({
+    super.key,
+    required this.title,
+    required this.value,
+    required this.icon,
+    required this.chartData,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -315,16 +479,85 @@ class WeatherCard extends StatelessWidget {
         elevation: 6,
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
         child: InkWell(
-          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (c) => WeatherDetailsScreen(title: title, currentValue: value, chartData: chartData))),
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (c) => WeatherDetailsScreen(
+                title: title,
+                currentValue: value,
+                chartData: chartData,
+              ),
+            ),
+          ),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Text(icon, style: const TextStyle(fontSize: 48)),
               const SizedBox(height: 8),
               Text(title, style: Theme.of(context).textTheme.titleMedium),
-              Text(value, style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Theme.of(context).colorScheme.primary)),
+              Text(
+                value,
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class SensorCard extends StatelessWidget {
+  final String title, value, subtitle;
+  final IconData icon;
+
+  const SensorCard({
+    super.key,
+    required this.title,
+    required this.value,
+    required this.subtitle,
+    required this.icon,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 4,
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.all(14.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 32, color: Theme.of(context).colorScheme.primary),
+            const SizedBox(height: 6),
+            Text(
+              title,
+              style: Theme.of(context).textTheme.titleSmall,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              value,
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              subtitle,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 12),
+            ),
+          ],
         ),
       ),
     );
@@ -335,11 +568,19 @@ class WeatherDetailsScreen extends StatelessWidget {
   final String title, currentValue;
   final List<ChartPoint> chartData;
 
-  const WeatherDetailsScreen({super.key, required this.title, required this.currentValue, required this.chartData});
+  const WeatherDetailsScreen({
+    super.key,
+    required this.title,
+    required this.currentValue,
+    required this.chartData,
+  });
 
   @override
   Widget build(BuildContext context) {
-    double overallAvg = chartData.isEmpty ? 0 : chartData.map((e) => e.value).reduce((a, b) => a + b) / chartData.length;
+    double overallAvg = chartData.isEmpty
+        ? 0
+        : chartData.map((e) => e.value).reduce((a, b) => a + b) /
+              chartData.length;
     String unit = currentValue.replaceAll(RegExp(r'[0-9.,]'), '').trim();
 
     Map<String, List<double>> groupedByDay = {};
@@ -355,8 +596,10 @@ class WeatherDetailsScreen extends StatelessWidget {
     groupedByDay.forEach((dayKey, values) {
       double sum = values.reduce((a, b) => a + b);
       double avg = sum / values.length;
-      DateTime dayDate = DateTime.parse(dayKey).add(const Duration(hours: 12)); 
-      dailyAverages.add(ChartPoint(dayDate, double.parse(avg.toStringAsFixed(1))));
+      DateTime dayDate = DateTime.parse(dayKey).add(const Duration(hours: 12));
+      dailyAverages.add(
+        ChartPoint(dayDate, double.parse(avg.toStringAsFixed(1))),
+      );
     });
 
     dailyAverages.sort((a, b) => a.time.compareTo(b.time));
@@ -369,74 +612,124 @@ class WeatherDetailsScreen extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text("Obecnie", style: TextStyle(fontSize: 20)),
-            Text(currentValue, style: TextStyle(fontSize: 48, fontWeight: FontWeight.bold, color: Theme.of(context).colorScheme.primary)),
+            Text(
+              currentValue,
+              style: TextStyle(
+                fontSize: 48,
+                fontWeight: FontWeight.bold,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ),
             const SizedBox(height: 8),
-            Text("Średnia z całej historii: ${overallAvg.toStringAsFixed(1)} $unit"),
+            Text(
+              "Średnia z całej historii: ${overallAvg.toStringAsFixed(1)} $unit",
+            ),
             const SizedBox(height: 48),
             Expanded(
-              child: dailyAverages.length < 2 
-              ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.auto_graph, size: 64, color: Colors.grey[300]),
-                      const SizedBox(height: 16),
-                      const Text(
-                        "Zbyt mało danych",
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.grey),
+              child: dailyAverages.length < 2
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.auto_graph,
+                            size: 64,
+                            color: Colors.grey[300],
+                          ),
+                          const SizedBox(height: 16),
+                          const Text(
+                            "Zbyt mało danych",
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.grey,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            "Wykres trendów pojawi się,\ngdy aplikacja zbierze dane z co najmniej 2 dni.",
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        "Wykres trendów pojawi się,\ngdy aplikacja zbierze dane z co najmniej 2 dni.",
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.grey),
-                      ),
-                    ],
-                  ),
-                )
-              : LineChart(
-                  LineChartData(
-                    gridData: const FlGridData(show: true, drawVerticalLine: true),
-                    lineTouchData: LineTouchData(
-                      touchTooltipData: LineTouchTooltipData(
-                        getTooltipColor: (spot) => Colors.blueGrey,
-                        getTooltipItems: (spots) => spots.map((s) {
-                          final date = DateTime.fromMillisecondsSinceEpoch(s.x.toInt());
-                          return LineTooltipItem("${DateFormat('dd.MM').format(date)}\n${s.y} $unit", const TextStyle(color: Colors.white));
-                        }).toList(),
-                      ),
-                    ),
-                    titlesData: FlTitlesData(
-                      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                      rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                      bottomTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          reservedSize: 30,
-                          interval: 86400000, 
-                          getTitlesWidget: (val, meta) {
-                            final date = DateTime.fromMillisecondsSinceEpoch(val.toInt());
-                            return Padding(
-                              padding: const EdgeInsets.only(top: 8.0),
-                              child: Text(DateFormat('dd.MM').format(date), style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                            );
-                          },
+                    )
+                  : LineChart(
+                      LineChartData(
+                        gridData: const FlGridData(
+                          show: true,
+                          drawVerticalLine: true,
                         ),
+                        lineTouchData: LineTouchData(
+                          touchTooltipData: LineTouchTooltipData(
+                            getTooltipColor: (spot) => Colors.blueGrey,
+                            getTooltipItems: (spots) => spots.map((s) {
+                              final date = DateTime.fromMillisecondsSinceEpoch(
+                                s.x.toInt(),
+                              );
+                              return LineTooltipItem(
+                                "${DateFormat('dd.MM').format(date)}\n${s.y} $unit",
+                                const TextStyle(color: Colors.white),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                        titlesData: FlTitlesData(
+                          topTitles: const AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                          rightTitles: const AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                          bottomTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 30,
+                              interval: 86400000,
+                              getTitlesWidget: (val, meta) {
+                                final date =
+                                    DateTime.fromMillisecondsSinceEpoch(
+                                      val.toInt(),
+                                    );
+                                return Padding(
+                                  padding: const EdgeInsets.only(top: 8.0),
+                                  child: Text(
+                                    DateFormat('dd.MM').format(date),
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                          leftTitles: const AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 45,
+                            ),
+                          ),
+                        ),
+                        borderData: FlBorderData(show: false),
+                        lineBarsData: [
+                          LineChartBarData(
+                            spots: dailyAverages
+                                .map(
+                                  (e) => FlSpot(
+                                    e.time.millisecondsSinceEpoch.toDouble(),
+                                    e.value,
+                                  ),
+                                )
+                                .toList(),
+                            isCurved: true,
+                            barWidth: 3,
+                            color: Theme.of(context).colorScheme.primary,
+                            dotData: const FlDotData(show: true),
+                          ),
+                        ],
                       ),
-                      leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: true, reservedSize: 45)),
                     ),
-                    borderData: FlBorderData(show: false),
-                    lineBarsData: [
-                      LineChartBarData(
-                        spots: dailyAverages.map((e) => FlSpot(e.time.millisecondsSinceEpoch.toDouble(), e.value)).toList(),
-                        isCurved: true,
-                        barWidth: 3,
-                        color: Theme.of(context).colorScheme.primary,
-                        dotData: const FlDotData(show: true), 
-                      ),
-                    ],
-                  ),
-                ),
             ),
           ],
         ),
